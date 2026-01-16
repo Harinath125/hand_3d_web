@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Precision Dual-Hand Studio</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #ffffff; font-family: 'Segoe UI', sans-serif; }
+    #debug-canvas { position: absolute; top:0; left:0; transform: scaleX(-1); opacity: 0.05; pointer-events: none; }
+    .hud { position: absolute; top: 15px; width: 100%; text-align: center; color: #222; z-index: 10; pointer-events: none; }
+    .status-bar { position: absolute; bottom: 20px; left: 20px; font-family: monospace; color: #888; }
+  </style>
+</head>
+<body>
+
+<div class="hud">
+  <h2 style="letter-spacing: 2px;">PRECISION 3D INTERFACE</h2>
+  <p>Smoothed Tracking Active • Dual-Hand Transformation</p>
+</div>
+<div class="status-bar" id="ui-info">Waiting for Camera...</div>
+
+<canvas id="three-canvas"></canvas>
+<canvas id="debug-canvas"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+/* ---------- ENGINE SETUP ---------- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xffffff);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.position.z = 8;
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('three-canvas'), antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const spot = new THREE.PointLight(0xffffff, 1);
+spot.position.set(0, 10, 10);
+scene.add(spot);
+
+/* ---------- SMOOTHING SETTINGS ---------- */
+const SMOOTHING = 0.12; // Lower = smoother but slower. Higher = more responsive but jittery.
+let targetPos = new THREE.Vector3(0, 0, 0);
+let targetRot = new THREE.Euler(0, 0, 0);
+let targetScale = new THREE.Vector3(1, 1, 1);
+
+/* ---------- VIRTUAL HANDS ---------- */
+function createHand(color) {
+    const group = new THREE.Group();
+    const dots = [];
+    const geo = new THREE.SphereGeometry(0.06, 8, 8);
+    const mat = new THREE.MeshBasicMaterial({ color: color });
+    for(let i=0; i<21; i++) {
+        const m = new THREE.Mesh(geo, mat);
+        dots.push(m); group.add(m);
+    }
+    scene.add(group);
+    return { group, dots };
+}
+const ghostR = createHand(0x333333); // Right
+const ghostL = createHand(0x00aaff); // Left
+
+/* ---------- INVENTORY & BIN ---------- */
+const items = [];
+const shapes = [
+    { type: 'cone', geo: new THREE.ConeGeometry(0.35, 0.6, 16), color: 0x5555ff },
+    { type: 'cylinder', geo: new THREE.CylinderGeometry(0.3, 0.3, 0.6, 16), color: 0xffff55 },
+    { type: 'box', geo: new THREE.BoxGeometry(0.6, 0.6, 0.6), color: 0xff4444 },
+    { type: 'sphere', geo: new THREE.SphereGeometry(0.4, 32, 32), color: 0x44ff44 },
+    { type: 'donut', geo: new THREE.TorusGeometry(0.35, 0.15, 16, 32), color: 0x4444ff },
+    { type: 'knot', geo: new THREE.TorusKnotGeometry(0.3, 0.1, 64, 8), color: 0xffaa00 }
+];
+
+shapes.forEach((s, i) => {
+    const m = new THREE.Mesh(s.geo, new THREE.MeshStandardMaterial({color: s.color}));
+    m.position.set(-4.5 + (i * 3), 4, 0);
+    m.userData.type = s.type;
+    scene.add(m);
+    items.push(m);
+});
+
+const bin = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.2, 1.2), new THREE.MeshStandardMaterial({color: 0xff0000, wireframe: true}));
+bin.position.set(-6, -4, 0);
+scene.add(bin);
+
+/* ---------- HAND TRACKING LOGIC ---------- */
+let spawned = [];
+let active = null;
+let lastSpawn = 0;
+
+const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.8, minTrackingConfidence: 0.8 });
+
+hands.onResults(results => {
+    document.getElementById('ui-info').innerText = results.multiHandLandmarks ? `Hands Detected: ${results.multiHandLandmarks.length}` : "No Hands Found";
+    
+    const hStates = { Left: null, Right: null };
+    if (results.multiHandLandmarks) {
+        results.multiHandLandmarks.forEach((lm, i) => {
+            const side = results.multiHandedness[i].label;
+            hStates[side] = lm;
+            const ghost = side === 'Right' ? ghostR : ghostL;
+            lm.forEach((p, j) => {
+                // Precise mapping formula
+                ghost.dots[j].position.set((1-p.x-0.5)*16, -(p.y-0.5)*12, -p.z*10);
+            });
+        });
+    }
+
+    // RIGHT HAND: Spawning & Translation
+    if (hStates.Right) {
+        const rTip = ghostR.dots[8].position;
+        const rThumb = ghostR.dots[4].position;
+        const pinch = rTip.distanceTo(rThumb);
+
+        // Menu Hit Test
+        items.forEach(btn => {
+            if (rTip.distanceTo(btn.position) < 0.8 && Date.now() - lastSpawn > 1000) {
+                spawn(btn.userData.type);
+                lastSpawn = Date.now();
+            }
+        });
+
+        // Grabbing
+        if (pinch < 0.6) {
+            if (!active) {
+                spawned.forEach(obj => { if(rTip.distanceTo(obj.position) < 1.2) active = obj; });
+            }
+            if (active) {
+                targetPos.copy(rTip); // Move target to hand
+                // Delete check
+                if (active.position.distanceTo(bin.position) < 1.5) {
+                    scene.remove(active);
+                    spawned = spawned.filter(o => o !== active);
+                    active = null;
+                }
+            }
+        } else { active = null; }
+    }
+
+    // LEFT HAND: Rotation & Scaling
+    if (active && hStates.Left) {
+        const lTip = ghostL.dots[8].position;
+        const lThumb = ghostL.dots[4].position;
+        
+        // Use left hand relative position for precise rotation
+        targetRot.y = (lTip.x * 0.5);
+        targetRot.x = -(lTip.y * 0.5);
+
+        // Scaling (Dual pinch)
+        if (hStates.Right && lTip.distanceTo(lThumb) < 0.6) {
+            const d = ghostR.dots[8].position.distanceTo(lTip);
+            const s = Math.max(0.2, d * 0.25);
+            targetScale.set(s, s, s);
+        }
+    }
+});
+
+function spawn(type) {
+    const s = shapes.find(x => x.type === type);
+    const m = new THREE.Mesh(s.geo.clone(), new THREE.MeshStandardMaterial({color: s.color, roughness: 0.3}));
+    m.position.set(0,0,0);
+    scene.add(m);
+    spawned.push(m);
+    active = m;
+}
+
+const cam = new Camera(document.createElement("video"), {
+    onFrame: async () => { await hands.send({ image: cam.video }); },
+    width: 640, height: 480
+});
+cam.start();
+
+/* ---------- ANIMATION LOOP (The Stability Engine) ---------- */
+function animate() {
+    requestAnimationFrame(animate);
+    
+    // Apply Lerp (Linear Interpolation) for buttery smooth movement
+    if (active) {
+        active.position.lerp(targetPos, SMOOTHING);
+        active.rotation.x = THREE.MathUtils.lerp(active.rotation.x, targetRot.x, SMOOTHING);
+        active.rotation.y = THREE.MathUtils.lerp(active.rotation.y, targetRot.y, SMOOTHING);
+        active.scale.lerp(targetScale, SMOOTHING);
+    }
+    
+    items.forEach(m => m.rotation.y += 0.01);
+    renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

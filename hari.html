@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Hari Spatial Studio – Voice AI</title>
+
+<style>
+body {
+  margin: 0;
+  overflow: hidden;
+  font-family: Arial, sans-serif;
+  background: white;
+}
+
+#overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(255,255,255,0.95);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+#start-btn {
+  padding: 18px 40px;
+  font-size: 22px;
+  border-radius: 40px;
+  border: none;
+  cursor: pointer;
+  background: #007bff;
+  color: white;
+}
+
+#speech-status {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  background: #222;
+  color: #00ffcc;
+  padding: 12px;
+  border-radius: 8px;
+  font-family: monospace;
+}
+
+.hud {
+  position: absolute;
+  top: 15px;
+  left: 15px;
+  color: #222;
+}
+</style>
+</head>
+
+<body>
+
+<div id="overlay">
+  <h1>Spatial Studio AI</h1>
+  <p>Click to activate Voice AI</p>
+  <button id="start-btn">ACTIVATE</button>
+</div>
+
+<div class="hud">
+  <h3>Commands</h3>
+  <p>Hari put box / sphere / cone / donut</p>
+  <p>Hari clear</p>
+  <p>Hari photo</p>
+</div>
+
+<div id="speech-status">Status: Idle</div>
+
+<canvas id="three-canvas"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+
+<script>
+/* ---------------- VOICE OUTPUT ---------------- */
+function speak(text) {
+  const msg = new SpeechSynthesisUtterance(text);
+  msg.rate = 1;
+  msg.pitch = 1.1;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(msg);
+  statusBox.innerText = "AI: " + text;
+}
+
+/* ---------------- THREE SETUP ---------------- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xffffff);
+
+const camera = new THREE.PerspectiveCamera(
+  75, window.innerWidth / window.innerHeight, 0.1, 1000
+);
+camera.position.z = 6;
+
+const renderer = new THREE.WebGLRenderer({
+  canvas: document.getElementById("three-canvas"),
+  antialias: true
+});
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+const light = new THREE.PointLight(0xffffff, 1);
+light.position.set(5, 10, 5);
+scene.add(light);
+
+/* ---------------- SHAPES ---------------- */
+const shapes = {
+  box: new THREE.BoxGeometry(1,1,1),
+  sphere: new THREE.SphereGeometry(0.7,32,32),
+  cone: new THREE.ConeGeometry(0.7,1.2,32),
+  donut: new THREE.TorusGeometry(0.6,0.25,16,60)
+};
+
+let objects = [];
+
+function addShape(name) {
+  const geo = shapes[name];
+  if (!geo) return;
+
+  const mesh = new THREE.Mesh(
+    geo,
+    new THREE.MeshStandardMaterial({
+      color: Math.random() * 0xffffff,
+      roughness: 0.3
+    })
+  );
+
+  mesh.position.x = (Math.random() - 0.5) * 3;
+  mesh.position.y = (Math.random() - 0.5) * 2;
+  scene.add(mesh);
+  objects.push(mesh);
+}
+
+/* ---------------- VOICE INPUT ---------------- */
+const statusBox = document.getElementById("speech-status");
+
+const SpeechRecognition =
+  window.SpeechRecognition || window.webkitSpeechRecognition;
+
+let recognition;
+
+if (SpeechRecognition) {
+  recognition = new SpeechRecognition();
+  recognition.continuous = true;
+  recognition.lang = "en-US";
+
+  recognition.onresult = (e) => {
+    const text = e.results[e.results.length - 1][0].transcript.toLowerCase();
+    statusBox.innerText = "Heard: " + text;
+
+    if (!text.includes("hari")) return;
+
+    if (text.includes("put") || text.includes("add")) {
+      for (let key in shapes) {
+        if (text.includes(key)) {
+          addShape(key);
+          speak("Added " + key);
+          return;
+        }
+      }
+      speak("Which shape should I add?");
+    }
+
+    if (text.includes("clear")) {
+      objects.forEach(o => scene.remove(o));
+      objects = [];
+      speak("Studio cleared");
+    }
+
+    if (text.includes("photo") || text.includes("screenshot")) {
+      renderer.render(scene, camera);
+      const link = document.createElement("a");
+      link.download = "studio.png";
+      link.href = renderer.domElement.toDataURL();
+      link.click();
+      speak("Photo saved");
+    }
+  };
+}
+
+/* ---------------- START ---------------- */
+document.getElementById("start-btn").onclick = () => {
+  document.getElementById("overlay").style.display = "none";
+  speak("System online. Hello Hari.");
+  if (recognition) recognition.start();
+};
+
+/* ---------------- ANIMATION ---------------- */
+function animate() {
+  requestAnimationFrame(animate);
+  objects.forEach(o => o.rotation.y += 0.01);
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+
+</body>
+</html>

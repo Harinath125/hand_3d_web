@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>3D Spatial Master Cube</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #111; font-family: 'Segoe UI', sans-serif; }
+    canvas { position: absolute; top: 0; left: 0; }
+    #debug-canvas { transform: scaleX(-1); opacity: 0.3; pointer-events: none; z-index: 5; }
+    #three-canvas { z-index: 10; }
+    .ui { 
+      position: absolute; bottom: 30px; left: 30px; color: white; z-index: 20; 
+      background: rgba(0,0,0,0.5); padding: 15px; border-radius: 10px; border: 1px solid #444;
+    }
+    .controls { font-size: 0.8em; color: #00ffff; margin-top: 5px; }
+  </style>
+</head>
+<body>
+
+<div class="ui">
+  <strong>3D Spatial Cube</strong>
+  <div class="controls">
+    • Pinch Thumb & Index to <b>Grab & Move</b><br>
+    • Move hand forward/back for <b>Depth (Z)</b><br>
+    • Change pinch width to <b>Zoom/Scale</b>
+  </div>
+</div>
+
+<canvas id="three-canvas"></canvas>
+<canvas id="debug-canvas"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+/* ---------- THREE.JS SCENE SETUP ---------- */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.z = 5;
+
+const renderer = new THREE.WebGLRenderer({ 
+    canvas: document.getElementById('three-canvas'), 
+    alpha: true, 
+    antialias: true 
+});
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambientLight);
+const pointLight = new THREE.PointLight(0xffffff, 1);
+pointLight.position.set(10, 10, 10);
+scene.add(pointLight);
+
+const geometry = new THREE.BoxGeometry(1, 1, 1);
+const material = new THREE.MeshStandardMaterial({ color: 0x00ffff, metalness: 0.7, roughness: 0.1 });
+const cube = new THREE.Mesh(geometry, material);
+scene.add(cube);
+
+/* ---------- PHYSICS & STATE ---------- */
+const targetPosition = new THREE.Vector3(0, 0, 0);
+const targetScale = new THREE.Vector3(1, 1, 1);
+const lerpSpeed = 0.15;
+const particles = [];
+
+/* ---------- PARTICLE TRAIL SYSTEM ---------- */
+const partGeo = new THREE.SphereGeometry(0.06, 6, 6);
+function createParticle(pos, color) {
+    const pMat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.7 });
+    const p = new THREE.Mesh(partGeo, pMat);
+    p.position.copy(pos);
+    p.userData = { life: 1.0, vel: new THREE.Vector3((Math.random()-0.5)*0.05, (Math.random()-0.5)*0.05, (Math.random()-0.5)*0.05) };
+    scene.add(p);
+    particles.push(p);
+}
+
+function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.userData.life -= 0.03;
+        p.position.add(p.userData.vel);
+        p.scale.setScalar(p.userData.life);
+        p.material.opacity = p.userData.life;
+        if (p.userData.life <= 0) {
+            scene.remove(p);
+            particles.splice(i, 1);
+        }
+    }
+}
+
+/* ---------- MEDIAPIPE SETUP ---------- */
+const debugCanvas = document.getElementById("debug-canvas");
+const ctx = debugCanvas.getContext("2d");
+debugCanvas.width = window.innerWidth;
+debugCanvas.height = window.innerHeight;
+
+const video = document.createElement("video");
+const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+
+hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.8, minTrackingConfidence: 0.8 });
+
+hands.onResults(results => {
+    ctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+    let isGrabbing = false;
+
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
+        drawLandmarks(ctx, landmarks, { color: '#FF0000', radius: 2 });
+
+        const thumb = landmarks[4];
+        const index = landmarks[8];
+        const wrist = landmarks[0];
+        const midKnuckle = landmarks[9];
+
+        // 1. PINCH LOGIC (X, Y and Grab)
+        const dx = thumb.x - index.x;
+        const dy = thumb.y - index.y;
+        const pinchDist = Math.sqrt(dx*dx + dy*dy);
+        
+        // 2. DEPTH LOGIC (Z) - Using hand size proxy
+        const hx = wrist.x - midKnuckle.x;
+        const hy = wrist.y - midKnuckle.y;
+        const handSize = Math.sqrt(hx*hx + hy*hy);
+        const depthZ = (handSize - 0.2) * 15; 
+
+        if (pinchDist < 0.08) {
+            isGrabbing = true;
+            const midX = 1 - (thumb.x + index.x) / 2; // Inverted for mirror
+            const midY = (thumb.y + index.y) / 2;
+            
+            targetPosition.set((midX * 2 - 1) * 5, -(midY * 2 - 1) * 4, depthZ);
+            
+            // Spawn particles if moving fast enough
+            if (cube.position.distanceTo(targetPosition) > 0.1) {
+                createParticle(cube.position, 0xff3333);
+            }
+        }
+
+        // 3. ZOOM LOGIC (Scaling)
+        const s = Math.max(0.4, Math.min(4, pinchDist * 10));
+        targetScale.set(s, s, s);
+    }
+
+    cube.material.color.set(isGrabbing ? 0xff3333 : 0x00ffff);
+});
+
+const cam = new Camera(video, {
+    onFrame: async () => { await hands.send({ image: video }); },
+    width: 640, height: 480
+});
+cam.start();
+
+/* ---------- RENDER LOOP ---------- */
+function animate() {
+    requestAnimationFrame(animate);
+    
+    // Smoothly transition cube to targets
+    cube.position.lerp(targetPosition, lerpSpeed);
+    cube.scale.lerp(targetScale, lerpSpeed);
+    
+    // Rotation
+    cube.rotation.x += 0.01;
+    cube.rotation.y += 0.01;
+
+    updateParticles();
+    renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    debugCanvas.width = window.innerWidth;
+    debugCanvas.height = window.innerHeight;
+});
+
+animate();
+</script>
+</body>
+</html>
